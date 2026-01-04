@@ -1,0 +1,9 @@
+.venv/
+env/
+__pycache__/
+*.pyc
+*.pkl
+*.joblib
+.ipynb_checkpoints/
+.DS_Store
+.env
