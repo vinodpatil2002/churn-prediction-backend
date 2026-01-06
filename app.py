@@ -1,11 +1,29 @@
 from fastapi import FastAPI, UploadFile, File
 import io
+import os
 import joblib
 import json
 from pydantic import BaseModel
 import pandas as pd
 import numpy as np
 from fastapi.middleware.cors import CORSMiddleware
+
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_DIR = os.path.join(BASE_DIR, "models")
+
+app = FastAPI(title="Churn Prediction API")
+
+model = joblib.load(os.path.join(MODEL_DIR, "logistic_model.pkl"))
+scaler = joblib.load(os.path.join(MODEL_DIR, "scaler.pkl"))
+
+with open(os.path.join(MODEL_DIR, "model_metadata.json")) as f:
+    metadata = json.load(f)
+
+FEATURES = metadata["features"]
+THRESHOLD = metadata["threshold"]
+
+feature_importance = dict(zip(FEATURES, model.coef_[0]))
 
 
 class CustomerInput(BaseModel):
@@ -18,28 +36,6 @@ class CustomerInput(BaseModel):
 
 RAW_COLUMNS = ["tenure", "MonthlyCharges", "TotalCharges", "Contract", "PaymentMethod"]
 
-
-app = FastAPI(title="Churn Prediction API")
-
-
-model = joblib.load("models/logistic_model.pkl")
-scaler = joblib.load("models/scaler.pkl")
-
-with open("models/model_metadata.json") as f:
-    metadata = json.load(f)
-
-
-FEATURES = metadata["features"]
-THRESHOLD = metadata["threshold"]
-
-feature_importance = dict(zip(FEATURES, model.coef_[0]))
-
-
-@app.get("/health")
-def health_check():
-    return {"status": "ok"}
-
-
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["http://localhost:3000"],
@@ -48,18 +44,21 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}
+
+
 @app.post("/predict")
 def predict(customer: CustomerInput):
-
     df = pd.DataFrame([customer.dict()])
+    df["TotalCharges"] = df["tenure"] * df["MonthlyCharges"]
 
-    # one hot encode
     df_encoded = pd.get_dummies(df)
-
     df_encoded = df_encoded.reindex(columns=FEATURES, fill_value=0)
 
     df_scaled = scaler.transform(df_encoded)
-
     prob = model.predict_proba(df_scaled)[0][1]
     prediction = int(prob >= THRESHOLD)
 
@@ -74,35 +73,37 @@ def predict(customer: CustomerInput):
 
 @app.post("/predict/batch")
 async def predict_batch(file: UploadFile = File(...)):
-
     contents = await file.read()
-
     df = pd.read_csv(io.StringIO(contents.decode("utf-8")))
 
-    # 1. keep only raw required columns
+    COLUMN_RENAME_MAP = {
+        "Tenure": "tenure",
+        "Monthly Charges": "MonthlyCharges",
+        "Payment Method": "PaymentMethod",
+    }
+    df.rename(columns=COLUMN_RENAME_MAP, inplace=True)
+
+    df["TotalCharges"] = df["tenure"] * df["MonthlyCharges"]
+
+    missing = [c for c in RAW_COLUMNS if c not in df.columns]
+    if missing:
+        return {
+            "error": "Invalid input file",
+            "missing_columns": missing,
+            "received_columns": list(df.columns),
+        }
+
     df_raw = df[RAW_COLUMNS].copy()
 
-    # 2. feature engineering (same as training)
-    df_raw["avg_monthly_spend"] = df_raw["MonthlyCharges"]
-    df_raw["total_spend_estimate"] = df_raw["MonthlyCharges"] * df_raw["tenure"]
-
-    # 3. one-hot encode
     df_encoded = pd.get_dummies(df_raw)
-
-    # 4. align with training features
     df_encoded = df_encoded.reindex(columns=FEATURES, fill_value=0)
 
-    # 5. scale
     df_scaled = scaler.transform(df_encoded)
-
-    # df_scaled = scaler.transform(df_model)
-
     probs = model.predict_proba(df_scaled)[:, 1]
-
     predictions = (probs >= THRESHOLD).astype(int)
 
     df["churn_probability"] = probs.round(3)
-    df["churn_prediction"] = predictions
+    df["churn_prediction"] = np.where(predictions == 1, "High Risk", "Low Risk")
 
     return {
         "total_customers": len(df),
@@ -119,7 +120,6 @@ def explain_prediction(df_encoded_row, top_k=3):
         coef = feature_importance.get(col, 0)
         impacts[col] = value * coef
 
-    # sort by absolute impact
     sorted_impacts = sorted(impacts.items(), key=lambda x: abs(x[1]), reverse=True)
 
     reasons = []
