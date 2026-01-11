@@ -84,5 +84,5 @@ http://localhost:8000/docs
 ---
 
 ## Notes
-- The frontend dashboard consuming this API is maintained in a separate repository
+- The frontend dashboard consuming this API is maintained in a separate [repository](https://github.com/vinodpatil2002/churn-prediction-frontend) 
 - Model artifacts are loaded at runtime to keep inference lightweight
